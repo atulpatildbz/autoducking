@@ -41,32 +41,22 @@ def detect_silence(filename, silence_threshold=-30, min_silence_len=0.1):
     
     return silence_periods
 
-def create_volume_envelope(audio_length, silence_periods, fade_duration=0.1):
+def create_smooth_envelope(audio_length, silence_periods, transition_duration=0.3):
     envelope = np.zeros(audio_length)  # Start with all zeros (fully ducked)
     sample_rate = 1000  # 1ms resolution
+    transition_samples = int(transition_duration * sample_rate)
     
     for start, end in silence_periods:
-        start_idx = int(start * sample_rate)
-        end_idx = min(int(end * sample_rate), audio_length)
-        fade_samples = int(fade_duration * sample_rate)
+        start_idx = max(0, int(start * sample_rate) - transition_samples)
+        end_idx = min(audio_length, int(end * sample_rate) + transition_samples)
         
-        # Ensure fade doesn't exceed silence period
-        fade_samples = min(fade_samples, (end_idx - start_idx) // 2)
-        
-        # Create fade in (from ducked to full volume)
-        fade_in = np.linspace(0, 1, fade_samples)
-        envelope[start_idx:start_idx+fade_samples] = fade_in[:len(envelope[start_idx:start_idx+fade_samples])]
-        
-        # Set silence period to 1 (full volume)
-        envelope[start_idx+fade_samples:end_idx-fade_samples] = 1
-        
-        # Create fade out (from full volume to ducked)
-        fade_out = np.linspace(1, 0, fade_samples)
-        envelope[end_idx-fade_samples:end_idx] = fade_out[:len(envelope[end_idx-fade_samples:end_idx])]
+        # Create smooth transition using a sine wave
+        transition = np.sin(np.linspace(0, np.pi, end_idx - start_idx)) * 0.5 + 0.5
+        envelope[start_idx:end_idx] = np.maximum(envelope[start_idx:end_idx], transition)
     
     return envelope
 
-def apply_ducking(voiceover_file, music_file, output_file, duck_amount=-10):
+def apply_ducking(voiceover_file, music_file, output_file, duck_amount=-10, music_tail=5):
     # Get audio information
     voiceover_info = get_audio_info(voiceover_file)
     music_info = get_audio_info(music_file)
@@ -84,19 +74,23 @@ def apply_ducking(voiceover_file, music_file, output_file, duck_amount=-10):
         print("No silence periods detected. The output may not have any ducking effect.")
     
     # Create volume envelope
-    envelope = create_volume_envelope(int(voiceover_duration * 1000), silence_periods)
+    envelope = create_smooth_envelope(int(voiceover_duration * 1000), silence_periods)
     
     # Load audio files
     voiceover = AudioSegment.from_file(voiceover_file)
     music = AudioSegment.from_file(music_file)
     
-    # Ensure music is as long as voiceover
-    if len(music) < len(voiceover):
-        music = music * (len(voiceover) // len(music) + 1)
-    music = music[:len(voiceover)]
+    # Ensure music is as long as voiceover plus the tail
+    total_duration = len(voiceover) + (music_tail * 1000)
+    if len(music) < total_duration:
+        music = music * (total_duration // len(music) + 1)
+    music = music[:total_duration]
+    
+    # Extend the envelope for the music tail
+    extended_envelope = np.concatenate([envelope, np.ones(music_tail * 1000)])
     
     # Convert envelope to dB scale
-    db_envelope = np.where(envelope > 0, 0, duck_amount)  # 0 dB for full volume, duck_amount for ducked
+    db_envelope = np.where(extended_envelope > 0, 0, duck_amount)  # 0 dB for full volume, duck_amount for ducked
     
     # Apply ducking
     chunk_length = 100  # 100ms chunks for more precise ducking
@@ -112,7 +106,10 @@ def apply_ducking(voiceover_file, music_file, output_file, duck_amount=-10):
     ducked_music = sum(ducked_chunks, AudioSegment.empty())
     
     # Mix voiceover and ducked music
-    output = voiceover.overlay(ducked_music)
+    output = voiceover.overlay(ducked_music[:len(voiceover)])
+    
+    # Add the music tail
+    output += ducked_music[len(voiceover):]
     
     # Export the result
     output.export(output_file, format="mp3")
@@ -123,4 +120,4 @@ voiceover_file = "voiceover.mp3"
 music_file = "music.mp3"
 output_file = "output_with_ducking.mp3"
 
-apply_ducking(voiceover_file, music_file, output_file)
+apply_ducking(voiceover_file, music_file, output_file, duck_amount=-10, music_tail=5)
